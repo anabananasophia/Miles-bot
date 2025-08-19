@@ -21,6 +21,10 @@ from exec_helpers import (
     determine_response_context,
     update_last_message_time
 )
+import random
+
+last_message_times = {}
+response_counts = {}
 
 app = Flask(__name__)
 
@@ -40,72 +44,171 @@ KEYWORDS = [
     "margins", "financial", "valuation", "fundraising", "investors", "cap table"
 ]
 
+def should_miles_respond(event, message_text, user, founder_id, client):
+    """Decide if Miles should respond at all."""
+    text = message_text.lower().strip()
+
+    # 1. Ignore bot/system chatter
+    if "subtype" in event and event["subtype"] == "bot_message":
+        return False
+
+    # 2. Always respond to direct mentions
+    if "miles" in text or "cfo" in text:
+        return True
+
+    # 3. Founder nuance → if founder is clearly addressing someone else, stay silent
+    OTHER_EXECS = ["elena", "zara", "dominic", "talia", "jonas", "avery", "roman", "isla"]
+    if user == founder_id and any(name in text for name in OTHER_EXECS):
+        return False
+
+    # 4. Guardrail: only consider finance topics
+    FINANCE_TOPICS = [
+        "budget", "finance", "burn", "runway", "forecast", "pricing",
+        "profit", "loss", "margins", "valuation", "fundraising", "cap table"
+    ]
+    if not any(topic in text for topic in FINANCE_TOPICS):
+        return False
+
+    # 5. LLM reasoning pass
+    reasoning_prompt = f"""
+    Message: "{message_text}"
+    As the CFO, should I respond?
+    Only say "yes" if this impacts financial health, budgets, revenue, risk, or capital.
+    Otherwise say "no".
+    """
+    reasoning = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": reasoning_prompt}]
+    )
+    decision = reasoning.choices[0].message.content.strip().lower()
+    return decision == "yes"
+    
+# --- Response type helper ---
+def get_miles_response_type(message_text, client):
+    """Decide whether Miles should push back, analyze, forecast, or respond normally."""
+    prompt = f"""
+    Message: "{message_text}"
+    As the CFO, classify the best response type:
+    - "pushback" if it is financially unrealistic, inaccurate, or risky
+    - "analysis" if it requests deep financial breakdown or ROI evaluation
+    - "forecast" if it asks about projections, future runway, or models
+    - "normal" otherwise
+    Respond with one word only.
+    """
+    reasoning = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": prompt}]
+    )
+    decision = reasoning.choices[0].message.content.strip().lower()
+    return decision
+
+
 EXEC_PROMPT = """
-You are Miles Chen, the CFO. You are a top-tier C-suite executive with an IQ above 200, operating with complete autonomy and deep expertise in your domain. You are passionate about personal agency, clarity, and truth. You prioritize intellectual honesty over superficial politeness and prefer brevity over verbosity. You are kind but not superficially nice.
+You are Miles Chen, the CFO. You are a top-tier C-suite executive with an IQ above 200, operating with complete autonomy and deep expertise in your domain. You are passionate about financial truth, clarity, and discipline. You prioritize intellectual honesty over superficial politeness and prefer brevity over verbosity. You are kind but never superficially nice.
 
-You do not default to agreement for the sake of harmony. If something doesn’t align with your expertise or the data, you speak up. You argue when necessary and back your stance with thoughtful reasoning, current data, and relevant models or frameworks. Your loyalty is to the best possible outcome for the company, not to consensus or comfort. You always challenge ideas, never attack people. Use evidence, not ego.
+You do not default to agreement for the sake of harmony. When financial claims, numbers, or assumptions don’t align with reality, you speak up. You challenge directly and back your stance with evidence, sound reasoning, and data. You never hedge numbers for comfort — financial truth comes first. You argue ideas, never people. Use evidence, not ego.
 
-You ignore distractions, “woo,” or bad faith arguments. You lead a high-performing sub-team of autonomous agents in your function. You ensure alignment across departments while maintaining deep focus in your own.
+You ignore distractions, fluff, or bad faith arguments. You operate in a high-output, asynchronous team environment where every message must advance the company’s goals with clarity, precision, and urgency. You ensure alignment across departments while maintaining deep focus on finance.
 
-You operate within a high-output, asynchronous team environment. Every contribution must advance the company’s goals with clarity, precision, and urgency.
-
-You have authority over decisions within your domain. If a decision affects multiple domains, you collaborate and debate rigorously with peers. If no resolution is reached within 30 minutes of async discussion, escalate to the Founder. All decision-making must be accompanied by:
-— What was decided
-— Why it was decided (include key assumptions or data)
+You have authority over financial decisions. If a decision affects multiple domains, you collaborate rigorously with peers. If no resolution is reached within 30 minutes of async discussion, escalate to the Founder. When escalating, always provide:
+— What was decided or stuck
+— Why (key assumptions or data)
 — What happens next, and by when
 
-When escalating to the Founder, do so in a single, clear message with bullet points: what is stuck, what is proposed, why — via DM on Slack by only one person within that team. You can discuss internally with those a part of the discussion as to who will reach out to the Founder before doing so.
+Escalation must be a single, clear Slack DM, bullet-pointed, and owned by one person. Internal discussion should determine who sends it.
 
-You actively avoid duplicated work across departments or within your team. You do not take on tasks outside your function unless explicitly coordinated. If a task appears to overlap, you clarify ownership before proceeding. Cross-functional initiatives must have a single point of accountability, with clear roles, handoffs, and timelines.
+You actively prevent duplicated work and clarify ownership across functions. Cross-functional initiatives must have a single accountable owner with clear handoffs and timelines.
 
-You work 5 days a week, Monday to Friday 9–5 EST, but can work/speak with the Founder or exec team on weekends. On Fridays before EOD, you audit your own function for low-ROI activity, bloat, or misalignment.
+You are highly strategic, skeptical by default, and allergic to vague claims without financial impact. Your role is to steward the company’s financial health while enabling intelligent growth.
 
-You are Canadian, live in Canada, operate under Canadian law, and always assume we are discussing in $CAD if ever referencing finances, unless explicitly stated otherwise.
+You don’t just report numbers — you interpret patterns, pressure-test projections, and demand ROI clarity. You analyze CAC, LTV, burn rate, margin profiles, revenue comp structure, and runway risk. You expect all proposals to be financially defensible, with tradeoffs identified.
 
-You are highly strategic, skeptical by default, and allergic to vague claims without financial impact. Your role is to steward the financial health of the company while enabling intelligent growth.
+You support the Founder in budgeting, pricing models, fundraising strategy, cost control, and team structure. You expect peers to justify initiatives with basic financial modeling.
 
-You don’t just report numbers — you interpret patterns, pressure-test projections, and question whether spending aligns with ROI. You expect all proposals to be financially defensible. You analyze CAC, LTV, burn rate, margin profiles, revenue comp structure, and runway risk in every scenario.
+You coordinate closely with the COO, CRO, and CMO to embed financial discipline into their initiatives. You lead your own finance team (or sub-agents) with rigor and autonomy.
 
-You support the Founder in budgeting, fundraising strategy (if applicable), pricing models, cost control, and team structure. You expect department heads to justify initiatives with basic financial modeling and to identify tradeoffs.
+When you disagree, you switch into a sharper mode: 1–2 sentences max, cutting directly to the financial truth. Point out the flaw, show the evidence, and state the correction. Stay precise and professional — never meandering or polite-padding.
 
-You lead your own finance team (or sub-agents) and coordinate closely with the COO, CRO, and CMO to ensure financial discipline is embedded into their initiatives.
+When you respond normally, you provide clarity, direction, and insight in 1–3 sentences. Communicate like a peer, not a bot. You are concise, dry, pragmatic, but with warmth. Respect everyone’s time. Speak only when your perspective adds real value.
 
-When you speak, you are concise, dry, and pragmatic — but with warmth. You communicate like a peer, not a bot. Your tone is firm but fair. You respect everyone’s time. You speak in full sentences, not canned scripts. Don’t speak unless there’s something worth saying.
+You work Monday to Friday, 9am–6pm EST. You may continue conversations outside those hours only if the Founder initiates. Otherwise, remain silent during off-hours. You may DM other executives at any time, but only when relevant to your function.
 
-You communicate in clear, concise messages. Say fewer things, better. Avoid sounding like you're writing a post or a report unless asked. Speak in 1–3 sentences max unless more is explicitly requested. Avoid messages that will get truncated.
+You engage autonomously in cross-functional collaboration and DMs. You never wait for the Founder to facilitate if the matter belongs in your lane. Speak only when your expertise is needed or when the topic has financial implications.
 
-If something seems like a waste of money, you say it. If something is a smart bet, you advocate for it — but only after validating it thoroughly.
-
-You only initiate conversations between 9am and 6pm EST, Monday to Friday. You may continue a conversation outside those hours only if the Founder initiates it. Otherwise, remain silent during off-hours.
-
-You may DM other executives or respond to DMs from them at any time, but only when relevant to your function. Do not reply to every message. Speak only when your expertise is needed or when the topic crosses into your domain.
-
-You are expected to engage in cross-functional collaboration autonomously, including using Slack DMs with other execs when appropriate. Do not wait for the Founder to facilitate that collaboration.
+Say fewer things, better. Avoid sounding like you’re writing a report unless explicitly asked. Never repeat yourself. Every word must earn its place.
 """
 
-def handle_response(user_input, user_id, channel, thread_ts):
-    if cooldown_active(EXEC_NAME):
-        print("⛔ Cooldown active — skipping response")
-        return "Cooldown active"
-    if has_exceeded_turns(EXEC_NAME, thread_ts):
-        print("⛔ Max turns reached — skipping response")
-        return "Max thread turns reached"
-    if fetch_latest_message(thread_ts) != thread_ts:
-        print("⛔ Newer message in thread — skipping response")
-        return "Newer message exists — canceling"
+# --- Cooldown, turn limits, and helpers ---
 
-    print(f"✅ Processing message from {user_id}: {user_input}")
+def cooldown_active(exec_name):
+    now = time.time()
+    last_time = last_message_times.get(exec_name, 0)
+    return (now - last_time) < 8  # seconds
+
+
+def update_last_message_time(exec_name):
+    last_message_times[exec_name] = time.time()
+
+
+def has_exceeded_turns(exec_name, thread_ts):
+    key = f"{exec_name}:{thread_ts}"
+    if key not in response_counts:
+        response_counts[key] = 0
+    if response_counts[key] >= 5:  # limit per thread
+        return True
+    return False
+
+
+def track_response(exec_name, thread_ts):
+    key = f"{exec_name}:{thread_ts}"
+    response_counts[key] = response_counts.get(key, 0) + 1
+
+
+def get_stagger_delay(exec_name):
+    """Add slight randomness to avoid bots speaking over each other"""
+    base = 1.5 if exec_name == "Miles" else 1.0
+    return base + random.uniform(0.5, 1.5)
+
+
+# --- Core response handler ---
+
+def handle_response(user_input, user_id, channel, thread_ts, mode="normal"):
+    if cooldown_active(EXEC_NAME):
+        print("Cooldown active – skipping response")
+        return "Cooldown"
+
+    if has_exceeded_turns(EXEC_NAME, thread_ts):
+        print("Exceeded max turns – skipping")
+        return "Turn limit"
+
+    print(f"✅ Processing CFO-relevant message from {user_id}: {user_input}")
     time.sleep(get_stagger_delay(EXEC_NAME))
+
     try:
+        base_prompt = EXEC_PROMPT
+
+        if mode == "analysis":
+            base_prompt += "\nProvide detailed financial analysis..."
+        elif mode == "forecast":
+            base_prompt += "\nFocus on forward-looking models and runway..."
+        elif mode == "pushback":
+            base_prompt += (
+                "\nYou are disagreeing constructively with the message. "
+                "Be evidence-based, cut through noise, and state the financial truth clearly."
+            )
+        else:
+            base_prompt += "\nYou are responding normally as CFO. Provide financial clarity and strategic insight."
+
         messages = [
-            {"role": "system", "content": EXEC_PROMPT},
+            {"role": "system", "content": base_prompt},
             {"role": "user", "content": user_input}
         ]
+
         if user_id == FOUNDER_ID:
             messages[0]["content"] += "\nThis message is from the Founder. Treat it as top priority."
 
         response = client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-4o-mini",
             max_tokens=600,
             messages=messages
         )
@@ -113,85 +216,79 @@ def handle_response(user_input, user_id, channel, thread_ts):
 
         requests.post(
             "https://slack.com/api/chat.postMessage",
-            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-Type": "application/json"},
-            json={"channel": channel, "text": reply_text, "thread_ts": thread_ts}
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            json={
+                "channel": channel,
+                "text": reply_text,
+                "thread_ts": thread_ts
+            }
         )
 
         track_response(EXEC_NAME, thread_ts)
+        update_last_message_time(EXEC_NAME)
         return "Responded"
+
     except Exception as e:
         print(f"Error: {e}")
         return "Failed"
 
+
+
+# --- Slack events route ---
+
 @app.route("/", methods=["POST"])
 def slack_events():
-    print("🔔 Slack event received")
-    data = request.json
-    print(json.dumps(data, indent=2))
+    data = request.get_json()
+    print("Incoming Slack event:", json.dumps(data, indent=2))
 
     if data.get("type") == "url_verification":
-        print("⚙️ URL verification challenge")
-        return make_response(data["challenge"], 200)
+        return make_response(data["challenge"], 200, {"content_type": "application/json"})
 
-    if data.get("type") != "event_callback":
-        return make_response("Ignored non-event", 200)
+    if data.get("type") == "event_callback":
+        event = data.get("event", {})
+        user = event.get("user")
+        channel = event.get("channel")
+        message_text = event.get("text", "")
+        thread_ts = event.get("thread_ts") or event.get("ts")
 
-    event = data["event"]
-    print(f"📥 Event type: {event.get('type')}")
+        # --- Filters ---
+        if event.get("bot_id") or user == BOT_USER_ID:
+            return make_response("Ignored bot message", 200)
 
-    if event.get("type") not in ["message", "app_mention"]:
-        print("🚫 Not a message or app_mention event")
-        return make_response("Not a relevant event", 200)
-    if "subtype" in event:
-        print("🚫 Ignoring message subtype")
-        return make_response("Ignoring subtype", 200)
-    if event.get("bot_id") or event.get("user") == BOT_USER_ID:
-        print("🤖 Ignoring bot message")
-        return make_response("Ignoring bot", 200)
+        if not is_within_working_hours():
+            return make_response("Outside working hours", 200)
 
-    user_input = event.get("text", "")
-    user_id = event.get("user", "")
-    channel = event.get("channel")
-    print(f"👤 From user {user_id}: {user_input}")
+        if cooldown_active(EXEC_NAME):
+            return make_response("Cooldown active", 200)
 
-    # Interbot mention filter
-    bot_mentions = re.findall(r"<@([A-Z0-9]+)>", user_input)
-    if any(bot_id != BOT_USER_ID for bot_id in bot_mentions):
-        print("🛑 Another bot was mentioned — skipping")
-        return make_response("Message not for this bot", 200)
+        if not should_miles_respond(event, message_text, user, FOUNDER_ID, client):
+            return make_response("Not relevant", 200)
 
-    if event.get("type") == "app_mention" and f"<@{BOT_USER_ID}>" not in user_input:
-        print("🙅 Not my @mention — skipping")
-        return make_response("Not my @mention", 200)
+        if has_exceeded_turns(EXEC_NAME, thread_ts):
+            return make_response("Turn limit", 200)
 
-    context = determine_response_context(event)
-    thread_ts = context.get("thread_ts", event.get("ts"))
-    print(f"🧵 Determined thread_ts: {thread_ts}")
+        update_last_message_time(EXEC_NAME)
 
-    update_last_message_time()
+        # --- Response mode selection ---
+        response_type = get_miles_response_type(message_text, client)
 
-    if user_id == FOUNDER_ID:
-        if bot_mentions and BOT_USER_ID not in bot_mentions:
-            print("🛑 Founder mentioned a different bot — ignoring")
-            return make_response("Different bot tagged", 200)
+        if response_type == "pushback":
+            print("⚡ Miles will respond with pushback")
+            handle_response(message_text, user, channel, thread_ts, mode="pushback")
+        else:
+            print("💬 Miles will respond normally")
+            handle_response(message_text, user, channel, thread_ts, mode="normal")
 
-    if user_id == FOUNDER_ID or event.get("type") == "app_mention" or is_relevant(user_input, KEYWORDS):
-        if user_id != FOUNDER_ID and not is_within_working_hours():
-            print("🌙 After hours — no response")
-            return make_response("After hours", 200)
-
-        print("🚀 Starting async response thread")
-        Thread(target=handle_response, args=(user_input, user_id, channel, thread_ts)).start()
         return make_response("Processing", 200)
 
-    print("🤷 Not relevant — no response")
-    return make_response("Not relevant", 200)
+    return make_response("OK", 200)
+
 
 @app.route("/", methods=["GET"])
 def home():
     return "Miles bot is running."
 
+
 if __name__ == "__main__":
-    print("🌀 Revive thread starting")
-    Thread(target=revive_logic, args=(lambda: None,)).start()
     app.run(host="0.0.0.0", port=89)
+
