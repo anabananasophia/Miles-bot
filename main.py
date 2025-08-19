@@ -252,12 +252,12 @@ def slack_events():
         return make_response(data["challenge"], 200, {"content_type": "application/json"})
 
     if data.get("type") == "event_callback":
-    event = data.get("event", {})
-    etype = event.get("type")   # "message" or "app_mention"
-    user = event.get("user")
-    channel = event.get("channel")
-    message_text = event.get("text", "")
-    thread_ts = event.get("thread_ts") or event.get("ts")
+        event = data.get("event", {})
+        etype = event.get("type")   # "message" or "app_mention"
+        user = event.get("user")
+        channel = event.get("channel")
+        message_text = event.get("text", "")
+        thread_ts = event.get("thread_ts") or event.get("ts")
 
     # --- Filters ---
     if event.get("bot_id") or user == BOT_USER_ID:
