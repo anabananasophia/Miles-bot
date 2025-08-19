@@ -275,13 +275,17 @@ def slack_events():
         if response_type == "pushback":
             print("⚡ Miles will respond with pushback")
             handle_response(message_text, user, channel, thread_ts, mode="pushback")
+        elif response_type == "analysis":
+            print("📊 Miles will respond with financial analysis")
+            handle_response(message_text, user, channel, thread_ts, mode="analysis")
+        elif response_type == "forecast":
+            print("📈 Miles will respond with forecasting")
+            handle_response(message_text, user, channel, thread_ts, mode="forecast")
         else:
             print("💬 Miles will respond normally")
             handle_response(message_text, user, channel, thread_ts, mode="normal")
 
         return make_response("Processing", 200)
-
-    return make_response("OK", 200)
 
 
 @app.route("/", methods=["GET"])
