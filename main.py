@@ -252,47 +252,52 @@ def slack_events():
         return make_response(data["challenge"], 200, {"content_type": "application/json"})
 
     if data.get("type") == "event_callback":
-        event = data.get("event", {})
-        user = event.get("user")
-        channel = event.get("channel")
-        message_text = event.get("text", "")
-        thread_ts = event.get("thread_ts") or event.get("ts")
+    event = data.get("event", {})
+    etype = event.get("type")   # "message" or "app_mention"
+    user = event.get("user")
+    channel = event.get("channel")
+    message_text = event.get("text", "")
+    thread_ts = event.get("thread_ts") or event.get("ts")
 
-        # --- Filters ---
-        if event.get("bot_id") or user == BOT_USER_ID:
-            return make_response("Ignored bot message", 200)
+    # --- Filters ---
+    if event.get("bot_id") or user == BOT_USER_ID:
+        return make_response("Ignored bot message", 200)
 
-        if not is_within_working_hours():
-            return make_response("Outside working hours", 200)
+    if not is_within_working_hours():
+        return make_response("Outside working hours", 200)
 
-        if cooldown_active(EXEC_NAME):
-            return make_response("Cooldown active", 200)
+    if cooldown_active(EXEC_NAME):
+        return make_response("Cooldown active", 200)
 
-        if not should_miles_respond(event, message_text, user, FOUNDER_ID, client):
-            return make_response("Not relevant", 200)
+    # 🚨 KEY CHANGE: handle app_mention as valid
+    if etype not in ["message", "app_mention"]:
+        return make_response("Unsupported event type", 200)
 
-        if has_exceeded_turns(EXEC_NAME, thread_ts):
-            return make_response("Turn limit", 200)
+    if not should_miles_respond(event, message_text, user, FOUNDER_ID, client):
+        return make_response("Not relevant", 200)
 
-        update_last_message_time(EXEC_NAME)
+    if has_exceeded_turns(EXEC_NAME, thread_ts):
+        return make_response("Turn limit", 200)
 
-        # --- Response mode selection ---
-        response_type = get_miles_response_type(message_text, client)
+    update_last_message_time(EXEC_NAME)
 
-        if response_type == "pushback":
-            print("⚡ Miles will respond with pushback")
-            handle_response(message_text, user, channel, thread_ts, mode="pushback")
-        elif response_type == "analysis":
-            print("📊 Miles will respond with financial analysis")
-            handle_response(message_text, user, channel, thread_ts, mode="analysis")
-        elif response_type == "forecast":
-            print("📈 Miles will respond with forecasting")
-            handle_response(message_text, user, channel, thread_ts, mode="forecast")
-        else:
-            print("💬 Miles will respond normally")
-            handle_response(message_text, user, channel, thread_ts, mode="normal")
+    # --- Response mode selection ---
+    response_type = get_miles_response_type(message_text, client)
 
-        return make_response("Processing", 200)
+    if response_type == "pushback":
+        print("⚡ Miles will respond with pushback")
+        handle_response(message_text, user, channel, thread_ts, mode="pushback")
+    elif response_type == "analysis":
+        print("📊 Miles will respond with financial analysis")
+        handle_response(message_text, user, channel, thread_ts, mode="analysis")
+    elif response_type == "forecast":
+        print("📈 Miles will respond with forecasting")
+        handle_response(message_text, user, channel, thread_ts, mode="forecast")
+    else:
+        print("💬 Miles will respond normally")
+        handle_response(message_text, user, channel, thread_ts, mode="normal")
+
+    return make_response("Processing", 200)
 
 
 @app.route("/", methods=["GET"])
