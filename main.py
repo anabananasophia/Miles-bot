@@ -52,9 +52,10 @@ def should_miles_respond(event, message_text, user, founder_id, client):
     if "subtype" in event and event["subtype"] == "bot_message":
         return False
 
-    # 2. Always respond to direct mentions
-    if "miles" in text or "cfo" in text:
+     # 2. Always respond if tagged or name/title mentioned
+    if f"<@{BOT_USER_ID}>" in message_text or "miles" in text or "cfo" in text:
         return True
+
 
     # 3. Founder nuance → if founder is clearly addressing someone else, stay silent
     OTHER_EXECS = ["elena", "zara", "dominic", "talia", "jonas", "avery", "roman", "isla"]
