@@ -240,6 +240,13 @@ def handle_response(user_input, user_id, channel, thread_ts, mode="normal"):
 def slack_events():
     data = request.get_json()
     print("Incoming Slack event:", json.dumps(data, indent=2))
+    print("=== NEW EVENT ===")
+    print(json.dumps(data, indent=2))
+    
+    event = data.get("event", {})
+    print("Event type:", event.get("type"))
+    print("User:", event.get("user"))
+    print("Text:", event.get("text"))
 
     if data.get("type") == "url_verification":
         return make_response(data["challenge"], 200, {"content_type": "application/json"})
